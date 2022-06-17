@@ -15,6 +15,7 @@ from tdf3_kas_core.models import HIERARCHY
 
 from tdf3_kas_core.models import Claims
 
+
 def compose_jwt(primary_ent, entity_bundles):
     return {
         "exp": 1638810866,
@@ -25,7 +26,7 @@ def compose_jwt(primary_ent, entity_bundles):
             "realm-management",
             "account"
         ],
-        "sub": primary_subj,
+        "sub": primary_ent,
         "typ": "Bearer",
         "azp": "tdf-client",
         "session_state": "e07edbee-e0ae-4f1d-b5c4-8f4273a58a80",

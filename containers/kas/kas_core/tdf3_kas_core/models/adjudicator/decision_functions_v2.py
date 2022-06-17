@@ -89,7 +89,7 @@ def any_of_decision(data_values, entity_claims, group_by_attr_instance=None):
             return True
 
 
-def hierarchy_decision(data_values, entity_claims, order, group_by_attr_instance):
+def hierarchy_decision(data_values, entity_claims, order, group_by_attr_instance=None):
     """Test hierarchy decision function."""
     logger.debug("Hierarchical decision function called")
 
