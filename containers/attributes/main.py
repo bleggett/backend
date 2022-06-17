@@ -551,7 +551,7 @@ async def read_attributes_definitions(
             # and a specific grouping value, then look for and return that
             if row.group_by_attr:
                 groupby_attr_q = table_attribute.select().where(
-                        table_attribute.c.id == row.group_by_attr
+                    table_attribute.c.id == row.group_by_attr
                 )
 
                 groupby_attr = await database.fetch_one(groupby_attr_q)
@@ -561,7 +561,7 @@ async def read_attributes_definitions(
                 if not groupby_attr:
                     raise HTTPException(
                         status_code=INTERNAL_SERVER_ERROR,
-                        detail="Groupby attribute not found",
+                        detail=f"Groupby attribute {groupby_attr} not found",
                     )
                 # If this attr has a group_by, get the name of the authority
                 # TODO there is probably a nicer SQL query that does all this in one go.
@@ -570,14 +570,15 @@ async def read_attributes_definitions(
                 groupby_authority = await database.fetch_one(groupby_authority_q)
                 if not groupby_authority:
                     raise HTTPException(
-                        status_code=BAD_REQUEST,
-                        detail="Group-by attribute authority does not exist")
+                        status_code=INTERNAL_SERVER_ERROR,
+                        detail=f"Group-by attribute authority {groupby_attr.namespace_id} does not exist")
 
                 attr_def.group_by = AttributeInstance(
                     authority=groupby_authority.name,
                     name=groupby_attr.name,
                     value=row.group_by_attrval
                 )
+
             attributes.append(attr_def)
         except ValidationError as e:
             logger.error(e)
