@@ -9,8 +9,8 @@ import json
 import base64
 
 from .models import Policy
-from .models import Entity
-from .models import EntityAttributes
+from .models import Claims
+from .models import ClaimsAttributes
 from .models import KeyAccess
 from .models import Context
 
@@ -42,22 +42,12 @@ def policy():
 
 
 @pytest.fixture
-def entity():
-    """Construct an entity object."""
-    user_id = "coyote@acme.com"
-    attribute1 = (
-        "https://aa.virtru.com/attr/unique-identifier"
-        "/value/7b738968-131a-4de9-b4a1-c922f60583e3"
-    )
-    attribute2 = (
-        "https://aa.virtru.com/attr/primary-organization"
-        "/value/7b738968-131a-4de9-b4a1-c922f60583e3"
-    )
-
-    attributes = EntityAttributes.create_from_list(
-        [{"attribute": attribute1}, {"attribute": attribute2}]
-    )
-    yield Entity(user_id, public_key, attributes)
+def claims():
+    """Test the basic constructor."""
+    user_id = "Hey It's Me"
+    attributes = {}
+    attributes[user_id] = ClaimsAttributes()
+    yield Claims(user_id, public_key, attributes)
 
 
 @pytest.fixture

@@ -38,7 +38,7 @@ from cryptography.hazmat.primitives.serialization import PublicFormat
 
 from pkg_resources import packaging
 
-from tdf3_kas_core.errors import AdjudicatorError
+from tdf3_kas_core.errors import PDPError
 from tdf3_kas_core.errors import AuthorizationError
 from tdf3_kas_core.errors import BadRequestError
 from tdf3_kas_core.errors import KeyAccessError
@@ -47,12 +47,8 @@ from tdf3_kas_core.errors import NanoTDFParseError
 from tdf3_kas_core.errors import PolicyError
 from tdf3_kas_core.errors import PolicyBindingError
 from tdf3_kas_core.errors import UnauthorizedError
-from tdf3_kas_core.errors import RouteNotFoundError
 
-from tdf3_kas_core.models import Adjudicator
 from tdf3_kas_core.models import AccessPDP
-from tdf3_kas_core.models import AttributePolicyCache
-from tdf3_kas_core.models import Entity
 from tdf3_kas_core.models import KeyAccess
 from tdf3_kas_core.models import Policy
 from tdf3_kas_core.models import WrappedKey
@@ -63,7 +59,6 @@ from tdf3_kas_core.models.nanotdf import ResourceLocator
 from tdf3_kas_core.models.nanotdf import ECCMode
 from tdf3_kas_core.models.nanotdf import SymmetricAndPayloadConfig
 
-from tdf3_kas_core.authorized import authorized
 from tdf3_kas_core.authorized import authorized_v2
 from tdf3_kas_core.authorized import looks_like_jwt
 from tdf3_kas_core.authorized import leeway
@@ -110,93 +105,6 @@ def ping(version):
     return {"version": f"{version}"}
 
 
-def rewrap(data, context, plugin_runner, key_master):
-    """Rewrap a key split.
-
-    The rewrap service is the guts of the whole KAS.  It takes a raw data
-    object that conforms to the JSON data schema for the /reqrap API call,
-    processes it, and returns an object ready to be converted to the web
-    response.  Context contains any other information.
-    """
-    logger.debug("===== REWRAP SERVICE START ====")
-    if "signedRequestToken" in data:
-        try:
-            decoded = jwt.decode(
-                data["signedRequestToken"],
-                options={"verify_signature": False},
-                algorithms=["RS256", "ES256", "ES384", "ES512"],
-                leeway=leeway,
-            )
-
-            requestBody = decoded["requestBody"]
-            json_string = requestBody.replace("'", '"')
-            dataJson = json.loads(json_string)
-        except ValueError as e:
-            raise BadRequestError(f"Error in jwt or content [{e}]") from e
-
-        signer_public_key = serialization.load_pem_public_key(
-            str.encode(dataJson["entity"]["signerPublicKey"]), backend=default_backend()
-        )
-        try:
-            jwt.decode(
-                data["signedRequestToken"],
-                signer_public_key,
-                algorithms=["RS256", "ES256", "ES384", "ES512"],
-                leeway=leeway,
-            )
-        except Exception as e:
-            raise UnauthorizedError("Not authorized") from e
-
-        try:
-            entity = Entity.load_from_raw_data(
-                dataJson["entity"], key_master.get_key("AA-PUBLIC")
-            )
-        except ValueError as e:
-            raise BadRequestError(f"Error in EO [{e}]") from e
-
-        return _nano_tdf_rewrap(dataJson, context, plugin_runner, key_master, entity)
-    else:
-        # Upack and validate the entity object.
-        if "entity" not in data:
-            raise UnauthorizedError("No Entity object")
-
-        try:
-            entity = Entity.load_from_raw_data(
-                data["entity"], key_master.get_key("AA-PUBLIC")
-            )
-        except ValueError as e:
-            raise BadRequestError(f"Error in EO [{e}]") from e
-
-        # Check the auth token.
-        if "authToken" not in data:
-            raise AuthorizationError("Entity not authorized")
-
-        try:
-            jwt.decode(
-                data["authToken"],
-                entity.public_key,
-                algorithms=["RS256", "ES256", "ES384", "ES512"],
-                leeway=leeway,
-            )
-        except Exception as e:
-            raise AuthorizationError("Not authorized") from e
-
-        if "keyAccess" not in data:
-            logger.error("Key Access missing from %s", data)
-            logger.setLevel(logging.DEBUG)  # dynamically escalate level
-            raise KeyAccessError("No key access object")
-
-        algorithm = data.get("algorithm", None)
-        if algorithm is None:
-            logger.warning("'algorithm' is missing and defaulting to TDF3 rewrap.")
-            algorithm = "rsa:2048"
-
-        if algorithm == "ec:secp256r1":
-            return _nano_tdf_rewrap(data, context, plugin_runner, key_master, entity)
-        else:
-            return _tdf3_rewrap(data, context, plugin_runner, key_master, entity)
-
-
 def _get_bearer_token_from_header(context):
     # Get bearer token
     try:
@@ -212,6 +120,7 @@ def _get_bearer_token_from_header(context):
 
     return idpJWT
 
+
 def _decode_and_validate_oidc_jwt(context, key_master):
     """Decodes the JWT in the Authorization header,
     validates it via the issuer pubkey,
@@ -222,6 +131,7 @@ def _decode_and_validate_oidc_jwt(context, key_master):
     realmKey = keycloak.fetch_realm_key_by_jwt(idpJWT, key_master)
     return authorized_v2(realmKey, idpJWT)
 
+
 def _get_tdf_claims(context, key_master):
     """Serializes the decoded and validated JWT into KAS's object model stuff.
     """
@@ -229,6 +139,7 @@ def _get_tdf_claims(context, key_master):
     claims = Claims.load_from_raw_data(decodedJwt)
 
     return claims
+
 
 def _fetch_attribute_definitions_from_authority_plugins(original_policy, plugin_runner):
     #
@@ -297,7 +208,7 @@ def rewrap_v2(data, context, plugin_runner, key_master):
         dataJson = json.loads(json_string)
     except ValueError as e:
         raise BadRequestError(f"Error in jwt or content [{e}]") from e
-    except Exception:
+    except Exception as e:
         raise UnauthorizedError("Not authorized") from e
 
     algorithm = dataJson.get("algorithm", None)
@@ -319,92 +230,6 @@ def rewrap_v2(data, context, plugin_runner, key_master):
 
         return _tdf3_rewrap_v2(dataJson, context, plugin_runner, key_master, claims)
 
-
-def _tdf3_rewrap(data, context, plugin_runner, key_master, entity):
-    """
-    Handle rewrap request for tdf3 type.
-    """
-
-    # Unpack the policy.
-    if "policy" not in data:
-        raise PolicyError("No policy")
-
-    try:
-        canonical_policy = data["policy"]
-        original_policy = Policy.construct_from_raw_canonical(canonical_policy)
-
-        kas_private = key_master.get_key("KAS-PRIVATE")
-        key_access = KeyAccess.from_raw(
-            data["keyAccess"],
-            private_key=kas_private,
-            canonical_policy=canonical_policy,
-            use="rewrap",
-        )
-    except ValueError as e:
-        raise BadRequestError(f"Error in Policy or Key Binding [{e}]") from e
-
-    #
-    # Run the plugins
-    #
-
-    # Fetch attributes from EAS and create attribute policy cache.
-    attribute_policy_cache = AttributePolicyCache()
-    data_attributes_namespaces = list(
-        original_policy.data_attributes.cluster_namespaces
-    )
-    if data_attributes_namespaces:
-        config = plugin_runner.fetch_attributes(data_attributes_namespaces)
-        attribute_policy_cache.load_config(config)
-
-    # Create adjudicator from the attributes from EAS.
-    adjudicator = Adjudicator(attribute_policy_cache)
-
-    (policy, res) = plugin_runner.update(original_policy, entity, key_access, context)
-
-    # Execute a premature bailout if the plugins provide a rewrapped key.
-    if "entityWrappedKey" in res:
-        logger.debug(
-            "REMOTE RETURNED AN ENTITY WRAPPED KEY [res = %s] REWRAP SERVICE FINISH",
-            res,
-        )
-        # Assume this is ok as is; DO NOT CHECK CREDENTIALS (?)
-        return res
-
-    elif "kasWrappedKey" in res:
-        # replace the wrapped key object in key_access with the new key
-        logger.debug(
-            "REMOTE RETURNED A KAS WRAPPED KEY; B64 KAS Wrapped key=[%s]",
-            res["kasWrappedKey"],
-        )
-        key_access.wrapped_key = res["kasWrappedKey"]
-
-    else:
-        logger.debug("KEY TO REWRAP CAME FROM REQUEST")
-        # A purely KAS operation
-        pass
-
-    # Check to see if the policy will grant the entity access.
-    # Raises an informative error if access is denied.
-    allowed = adjudicator.can_access(policy, entity)
-
-    if allowed is True:
-        logger.debug("========= Rewrap allowed = %s", allowed)
-        # Re-wrap the kas-wrapped key with the entity's public key.
-        if key_access.wrapped_key is not None:
-            wrapped_key = WrappedKey.from_raw(key_access.wrapped_key, kas_private)
-            res["entityWrappedKey"] = wrapped_key.rewrap_key(entity.public_key)
-            logger.debug("REWRAP SERVICE FINISH")
-            return res
-        else:
-            logger.error("Wrapped key missing from %s", key_access)
-            raise KeyAccessError("No wrapped key in key access model")
-
-    else:
-        # should never get to here. Bug in adjudicator.
-        m = f"Adjudicator returned {allowed} without raising an error"
-        logger.error(m)
-        logger.setLevel(logging.DEBUG)  # dynamically escalate level
-        raise AdjudicatorError(m)
 
 def _tdf3_rewrap_v2(data, context, plugin_runner, key_master, claims):
     """
@@ -482,11 +307,12 @@ def _tdf3_rewrap_v2(data, context, plugin_runner, key_master, claims):
             raise KeyAccessError("No wrapped key in key access model")
 
     else:
-        # should never get to here. Bug in adjudicator.
+        # should never get to here. Bug in PDP handler.
         m = f"AccessPDP returned {allowed} without raising an error"
         logger.error(m)
         logger.setLevel(logging.DEBUG)  # dynamically escalate level
-        raise AdjudicatorError(m)
+        raise PDPError(m)
+
 
 def _nano_tdf_rewrap(data, context, plugin_runner, key_master, claims):
     """
@@ -522,7 +348,7 @@ def _nano_tdf_rewrap(data, context, plugin_runner, key_master, claims):
         (policy_info, header) = PolicyInfo.parse(ecc_mode, payload_config, header)
 
         # extract ephemeral key from the header.
-        ephemeral_key = header[0 : ecc_mode.curve.public_key_byte_length]
+        ephemeral_key = header[0: ecc_mode.curve.public_key_byte_length]
 
     except Exception as e:
         logger.error(e)
@@ -546,7 +372,7 @@ def _nano_tdf_rewrap(data, context, plugin_runner, key_master, claims):
     policy_data = policy_info.body.data
     policy_data_len = len(policy_data) - payload_config.symmetric_tag_length
 
-    auth_tag = policy_data[-payload_config.symmetric_tag_length :]
+    auth_tag = policy_data[-payload_config.symmetric_tag_length:]
     logger.debug(
         f"virtru-ntdf-version: [{client_version}]; legacy_wrapping: {legacy_wrapping}; tag_length: {payload_config.symmetric_tag_length}, context: {context.data}"
     )
@@ -567,7 +393,7 @@ def _nano_tdf_rewrap(data, context, plugin_runner, key_master, claims):
         hash_alg = hashlib.sha256()
         hash_alg.update(policy_data)
         digest = hash_alg.digest()
-        if digest[-len(policy_info.binding.data) :] != policy_info.binding.data:
+        if digest[-len(policy_info.binding.data):] != policy_info.binding.data:
             raise PolicyBindingError("Gmac Policy binding" " verification failed.")
 
     original_policy = Policy.construct_from_raw_canonical(
@@ -592,7 +418,7 @@ def _nano_tdf_rewrap(data, context, plugin_runner, key_master, claims):
         m = "AccessPDP returned {} without raising an error".format(allowed)
         logger.error(m)
         logger.setLevel(logging.DEBUG)  # dynamically escalate level
-        raise AdjudicatorError(m)
+        raise PDPError(m)
 
     # Generate ephemeral rewrap key-pair
     client_public_key = serialization.load_pem_public_key(
@@ -629,64 +455,6 @@ def _nano_tdf_rewrap(data, context, plugin_runner, key_master, claims):
     return res
 
 
-def upsert(data, context, plugin_runner, key_master):
-    """Upsert a policy/key.
-
-    The upsert service is a proxy to the back-end services that persist
-    policies and keys.
-    """
-    logger.debug("UPSERT SERVICE START")
-
-    # Upack and validate the entity object.
-    if "entity" not in data:
-        raise AuthorizationError("No Entity object")
-
-    entity = Entity.load_from_raw_data(data["entity"], key_master.get_key("AA-PUBLIC"))
-
-    # Check the auth token.
-    try:
-        if "authToken" not in data:
-            raise AuthorizationError("Entity not authorized")
-        authorized(entity.public_key, data["authToken"])
-    except AuthorizationError:
-        logger.warning("Unauthorized access on behalf of [%s]", entity.userId)
-        raise
-
-    # Unpack the policy.
-    if "policy" not in data:
-        raise PolicyError("No policy")
-
-    try:
-        canonical_policy = data["policy"]
-        original_policy = Policy.construct_from_raw_canonical(canonical_policy)
-    except ValueError as e:
-        raise BadRequestError("Error in Policy definition") from e
-
-    # Get the key access object. Wrapped key may be in this object.
-    if "keyAccess" not in data:
-        raise KeyAccessError("No key access object")
-
-    kas_private = key_master.get_key("KAS-PRIVATE")
-    try:
-        key_access = KeyAccess.from_raw(
-            data["keyAccess"],
-            private_key=kas_private,
-            canonical_policy=canonical_policy,
-            use="upsert",
-        )
-    except ValueError as e:
-        raise BadRequestError("Error in KAO") from e
-
-    # Run the plugins
-    messages = plugin_runner.upsert(original_policy, entity, key_access, context)
-
-    if messages:
-        logger.info("Upsert Status Messages = %s", messages)
-    logger.debug("UPSERT SERVICE FINISH")
-
-    return messages  # XXX: Don't return internals!!
-
-
 def upsert_v2(data, context, plugin_runner, key_master):
     """Upsert a policy/key.
 
@@ -714,20 +482,13 @@ def upsert_v2(data, context, plugin_runner, key_master):
         dataJson = json.loads(json_string)
     except ValueError as e:
         raise BadRequestError(f"Error in jwt or content [{e}]") from e
-    except Exception:
+    except Exception as e:
         raise UnauthorizedError("Not authorized") from e
 
     algorithm = dataJson.get("algorithm", None)
     if algorithm is None:
         logger.warning("'algorithm' is missing and defaulting to TDF3 rewrap.")
         algorithm = "rsa:2048"
-
-    client_public_key = serialization.load_pem_public_key(
-        str.encode(dataJson["clientPublicKey"]), backend=default_backend()
-    )
-
-    # TODO BML fix
-	# entity = Entity(claims.user_id, client_public_key, claims.attributes)
 
     # Unpack the policy.
     if "policy" not in dataJson:
